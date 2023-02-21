@@ -1,0 +1,497 @@
+---
+title: "Excess Mortality - a Bayesian modeling approach"
+author: "Andreas Kryger Jensen"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  pdf_document:
+     number_sections: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+We are given weekly data in the form $(\texttt{deaths}_i, \texttt{population}_i)_{i=1}^{i=288}$ where $\texttt{deaths}_i$ are the number of deaths in week $i$ and $\texttt{population}_i$ is the corresponding population in the same week. Data starts in week 29 of 2017 and ends in week 3 of 2023.
+
+Our objective is to build a statistical model for the number of deaths and compare them to the actual observed values in order to make a probabilistic assessment of the excess mortality. 
+
+# Questions
+
+In order to address this objective we must consider two different questions. One of them is how to statistically model mortality data, and the other is how to communicate and disseminate the results to relevant stakeholders and government decision makers. This leads us to consider these two questions:
+
+1) How do we simultaneously quantify the magnitude and credibility of excesss mortality at some time point?
+2) How to we properly model time-varying mortality with sufficient inclusions of uncertainties
+
+We will propose some answers to these questions below.
+
+## Quantifying excess mortality
+
+To try to answer question 1 we propose to use a Bayesian modeling approach in which we compare the posterior predictive distribution of the number of deaths in a given month under a some statistical model as defined in question 2. 
+
+The key idea of this approach is that we will make the assessments based on a posterior predictive distribution and not on a model parameter representing average behavior. Let $\texttt{deaths}_i$ be an observed number of deaths, and $\widehat{\texttt{deaths}_i}$ a random variable from the posterior predictive distribution under some Bayesian model. We then propose two different measures that can convey both the magnitude and the predictive credibility simultaneously of excess mortality. One measure is an additive comparison given in terms of the excess number of deaths and given by
+\begin{align*}
+  P\left(\texttt{deaths}_i - \widehat{\texttt{deaths}_i} \geq \tau \mid \texttt{deaths}_i\right) \geq (1-\alpha)100\%
+\end{align*}
+with the interpretation under a lower predictive bound that the excess mortality in numbers of people is at least $\tau$. A similar but relative measure is
+\begin{align*}
+  P\left(\frac{\texttt{deaths}_i}{\widehat{\texttt{deaths}_i}}  \geq \tau \mid \texttt{deaths}_i\right) \geq (1-\alpha)100\%
+\end{align*}
+which for some lower predictive bound expresses the relative number of observed deaths compared to the posterior prediction. We note that this is also similar to a relative risk comparison in percentages since a division by the population size cancels from both the numerator and denominator. 
+
+Let $\Theta$ be the collection of parameters in the model. Then the posterior predictive distribution of the number of deaths is 
+\begin{align*}
+P(\widehat{\texttt{deaths}_i} \mid \mathcal{D}) = \int P(\widehat{\texttt{deaths}_i} \mid \Theta)P(\Theta \mid \mathcal{D})d\Theta
+\end{align*}
+where $\mathcal{D}$ is the observed data. This distribution can then be inserted into either of the two equations to estimate our proposed excess mortality measures.
+
+## Modeling excess mortality
+
+Having established a excess mortality measure based on a fully Bayesian approach an interesting issue appears when formulating the actual model. The issues is that the better (or closer) we model the trends in mortality, the less our estimate of excess mortality will be. This is because if we fitting the model "too well" then we are just modeling the observed mortality and there will be no excess. On the other hand, if we use a less flexible model we could and up concluding excess mortality all the time, since we are not following the current trend.
+
+We therefore consider two different model structures:
+
+1) A model including a long term (global trend) as a function of calendar time and a periodic year effect across months that repeats itself for every year
+2) A model only using a periodic year effect
+
+A statement about excess mortality from structure 1 would be interpreted as answering the question "Do we see excess mortality at the current point in time compared to what would expect to see in that current part of the year will adjusting for a global trend in mortality". The issue here could be that excess mortality is not seen as it just attributed to a global increasing trend.
+
+A statement about excess mortality from structure would be interpreted as answering the question "Do we see excess mortality at the current point in term compared to the average mortality at that time of the year over our follow-up period". The issue here could be that we end up in a perpetual state of excess mortality if the overall trend is increasing.
+
+We will now give examples of these two approaches below.
+
+# Models and results
+
+## Binomial model
+
+```{r, echo = FALSE, message = FALSE, cache = TRUE}
+library(brms)
+load("fits.RData")
+
+ci <- \(x, lower, upper, col = "gray") {
+  polygon(c(x, rev(x)), c(lower, rev(upper)), col = col, border = NA)
+}
+
+getStatsBinom <- \(m) {
+  newDat <- rbind(dTotal[,c("N", "time", "week")],
+                  data.frame(N = 5935859, time = 2023 + (1:52)/52, week = 1:52))
+  
+  post_pred <- predict(m, newdata = newDat, summary = FALSE)
+  mean <- apply(post_pred, 2, mean)
+  L <- apply(post_pred, 2, quantile, 0.025)
+  U <- apply(post_pred, 2, quantile, 0.975)
+  
+  list(mean = mean, 
+       L = L, 
+       U = U,
+       newDat = newDat)
+}
+
+getExcessBinom <- \(m, alpha = 0.95) {
+  post_pred <- predict(m, summary = FALSE)
+  
+  resid <- apply(post_pred, 1, \(q) dTotal$observed / q)
+  
+  excessProp <- seq(1, 1.14, length.out = 100)
+  excessMat <- matrix(NA, length(dTotal$prop), length(excessProp))
+  for(a in 1:length(dTotal$prop)) {
+    for(b in 1:length(excessProp)) {
+      excessMat[a, b] <- mean(resid[a,] >= excessProp[b])
+    }
+  }
+  out <- excessMat
+  out[excessMat < alpha] <- NA
+  list(prop = excessProp, img = out)
+}
+
+getTrendsBinom <- \(m, global) {
+  if(global) {
+    global <- posterior_smooths(m, "s(time)")
+    global_mean = apply(global, 2, mean)
+    global_L = apply(global, 2, quantile, 0.025)
+    global_U = apply(global, 2, quantile, 0.975)
+  } else {
+    global_mean <- NA
+    global_L <- NA
+    global_U <- NA
+  }
+  year <- posterior_smooths(m, 's(week,bs="cc")',
+                            newdata = data.frame(year = 2018 + (1:53)/53,
+                                                 week  = 1:53))
+  year_mean = apply(year, 2, mean)
+  year_L = apply(year, 2, quantile, 0.025)
+  year_U = apply(year, 2, quantile, 0.975)  
+  
+  list(global_mean = global_mean,
+       global_L = global_L,
+       global_U = global_U,
+       year_mean = year_mean,
+       year_L = year_L,
+       year_U = year_U)
+}
+
+stats_global1 <- getStatsBinom(m_global1)
+excess_global1 <- getExcessBinom(m_global1)
+trends_global1 <- getTrendsBinom(m_global1, TRUE)
+
+stats_local1 <- getStatsBinom(m_local1)
+excess_local1 <- getExcessBinom(m_local1)
+trends_local1 <- getTrendsBinom(m_local1, FALSE)
+```
+
+We first consider a model based on a Binomial likehood including both a long term global trend and a periodic year effect. The likelihood is:
+\begin{align*}
+  \texttt{deaths}_i \sim \mathrm{Binomial}\left(\texttt{population}_i, \mathrm{expit}(\beta + f_1(\texttt{time}_i; \theta_1) + f_2(\texttt{week}_i; \theta_2))\right)
+\end{align*}
+where $f_1$ is a smooth global trend across calender time modeled using thin plate regression splines parameterized by $\theta_1$, and $f_2$ is a periodic yearly effect across months that repeats it self over the different years. To enforce periodicity of $f_2$ we use cyclic cubic regression splines parametrized by $\theta_2$. In order to ensure identifiabylity, $f_1$ and $f_2$ are zero mean functions.
+
+The model with only a periodic year effect has the following likelihood:
+\begin{align*}
+  \texttt{deaths}_i \sim \mathrm{Binomial}\left(\texttt{population}_i, \mathrm{expit}(\widetilde{\beta} + \widetilde{f_2}(\texttt{week}_i; \widetilde{\theta_2}))\right)
+\end{align*}
+
+Figure \ref{fig:binomialFits} shows the results from the binomial model. The upper left panel shows the observed mortality in number of people (points), the posterior average (line) and a 95\% posterior predictive interval (gray). The dashed vertical line shows the last observation and to the right we show the model based forecast for the rest of 2023. It is important to note, that in order to do the forecasting one also needs to model and forecast the population size and it is part of the likelihood. Here for illustration we have just assumed that the population size at the last observation time will remain the same for the rest of the year (the full forecasting period). The top right panel of Figure \ref{fig:binomialFits} shows a similar model fit but only modeling the periodic year effect. The difference in the forecast is very clear.
+
+It is also worth noting that the model having only a yearly effect still shows a trend of increase in mortality (Figure \ref{fig:binomialFits} top right). This is due to the increasing population size and we are plotting the fit on the scale of number of deaths.
+
+
+```{r, fig.width = 8, fig.height = 5, echo = FALSE, fig.cap="\\label{fig:binomialFits} Results from fitting the binomial model with both a global and yearly effect and only a yearly effect. Posterior predictive intervals and relative excess mortality estimates at certainty level 95\\%.", echo = FALSE}
+par(mfrow=c(2,2), mgp=c(2,1,0), mar=c(3,3,2,2), bty="n")
+plot(observed ~ time, data = dTotal, pch=19, cex=0.4, type="n",
+     ylim=c(800,1800), xlim=c(2017, 2024), xlab="Calendar time", ylab="#deaths")
+ci(stats_global1$newDat$time, stats_global1$L, stats_global1$U)
+lines(stats_global1$newDat$time, stats_global1$mean, lwd = 2, type="l")
+points(observed ~ time, data = dTotal, pch=19, cex=0.5)
+title("Posterior prediction\n Binomial model (global trend + yearly trend)", cex.main=0.9)
+abline(v=max(dTotal$time), lty=2)
+
+plot(observed ~ time, data = dTotal, pch=19, cex=0.4, type="n",
+     ylim=c(800,1800), xlim=c(2017, 2024), xlab="Calendar time", ylab="#deaths")
+ci(stats_local1$newDat$time, stats_local1$L, stats_local1$U)
+lines(stats_local1$newDat$time, stats_local1$mean, lwd = 2, type="l")
+points(observed ~ time, data = dTotal, pch=19, cex=0.5)
+title("Posterior prediction\n Binomial model (yearly trend only)", cex.main=0.9)
+abline(v=max(dTotal$time), lty=2)
+
+image(dTotal$time, excess_global1$prop, excess_global1$img, xlim=c(2017, 2023),
+      xlab="Calendar time", ylab="Relative excess mortality", col="black")
+title("Excess mortality probability >= 95%\n Binomial model (global + yearly trend)", cex.main=0.9)
+
+image(dTotal$time, excess_local1$prop, excess_local1$img, xlim=c(2017, 2023),
+      xlab="Calendar time", ylab="Relative excess mortality", col="black")
+title("Excess mortality probability >= 95%\n Binomial model (yearly trend only)", cex.main=0.9)
+```
+
+The two lower panels of Figure \ref{fig:binomialFits} shows the estimated relative excess mortality with a certainty level of at least 95\% for the two models. The point made previously can here be seen in the sense that when modeling a global trend the estimated degree of excess is smaller than when only modeling the periodic year effect. Figure \ref{fig:binomialSmooths} shows the estimate effects from the models with 95\% credible intervals. Looking at the global trend (left panel) it is see that there is an overall increasing (though oscillating) trend in mortality which gives rise to the different forecasts.
+
+
+```{r, fig.width = 8, fig.height = 3, echo = FALSE, fig.cap="\\label{fig:binomialSmooths} Posterior estimates of the global and yearly effects from the binomial model with 95\\% credible intervals.", echo = FALSE}
+par(mfrow=c(1,3), mgp=c(2,1,0), mar=c(3,3,2,2), bty="n")
+plot(dTotal$time, trends_global1$global_mean, type="n", ylim=c(-0.2, 0.2),
+     xlab="Calendar time", ylab="log OR partial effect", xlim=c(2017, 2024))
+ci(dTotal$time, trends_global1$global_L, trends_global1$global_U)
+lines(dTotal$time, trends_global1$global_mean, lwd=2)
+title("Global trend\n Binomial model (global + yearly trend)")
+abline(h=0, lty=2)
+
+plot(1:53, trends_global1$year_mean, type="n", ylim=c(-0.2, 0.2),
+     xlab="Month of year", ylab="log OR partial effect")
+ci(1:53, trends_global1$year_L, trends_global1$year_U)
+lines(1:53, trends_global1$year_mean, lwd=2)
+title("Yearly trend\n Binomial model (global + yearly trend)")
+abline(h=0, lty=2)
+
+plot(1:53, trends_local1$year_mean, type="n", ylim=c(-0.2, 0.2),
+     xlab="Month of year", ylab="log OR partial effect")
+ci(1:53, trends_local1$year_L, trends_local1$year_U)
+lines(1:53, trends_local1$year_mean, lwd=2)
+title("Yearly trend\n Binomial model (yearly trend only)")
+abline(h=0, lty=2)
+```
+
+
+## Normal model
+
+One point of critique for the binomial model is that the variance of linked to the mean through the binomial variance. With data like this where the population size is large compared to the probability, this approches a Poisson behavior for which overdispersion is a well-known problem. 
+
+There are several different ways of addressing this issue. One possibility is to fit a model for the observed proportion of deaths based on a normal likelihood with time-varying effects on both the mean and variance parameters. We therefore now consider a model including a global and yearly effect on both the mean and variance as
+\begin{align*}
+  \mu_i &= \beta + f_1(\texttt{time}_i; \theta_1) + f_2(\texttt{week}_i; \theta_2)\\
+  \log \sigma_i &= \alpha + g_1(\texttt{time}_i; \phi_1) + g_2(\texttt{week}_i; \phi_2)\\
+  \frac{\texttt{deaths}_i}{\texttt{population}_i}1000 &\overset{D}{=} \mu_i + \sigma_i \varepsilon_i, \qquad \varepsilon_i \sim N(0, 1)
+\end{align*}
+
+Similarly as for the binomial model we also consider a model with only a yearly effect. That is given by
+\begin{align*}
+  \mu_i &= \widetilde{\beta} + \widetilde{f}_2(\texttt{week}_i; \widehat{\theta_2})\\
+  \log \sigma_i &= \widetilde{\alpha} + \widetilde{g}_2(\texttt{week}_i; \widehat{\phi_2})\\
+  \frac{\texttt{deaths}_i}{\texttt{population}_i}1000 &\overset{D}{=} \mu_i + \sigma_i \varepsilon_i, \qquad \varepsilon_i \sim N(0, 1)
+\end{align*}
+
+Figure \ref{fig:normalFits} shows the results from fitting the normal based models. It is seen that including a dynamic model for the variance has increased the overall level of predictive uncertainty, especially in the forecasts. This is similarly reflected in the lower estimates of relative excess mortality with a certainty level of at least 95\%.
+
+As a final example on how the model can be extended we fit a model similar to the normal model with global and yearly effects on both the mean and variance but also include a first order autoregressive discrete time process on the mean. The results are seen in Figure \ref{fig:normalFits2}. It is interesting here to see that the inclusion of the AR components has reduced the wiggliness of the global trend. 
+
+The question is now how to choose the order of the AR component. Instead of choosing a single one we propose to Bayesian model stacking across of models with order 1 to 20 with LOO weights. Figure \ref{fig:stacked} shows the stacked posterior predictive distribution, estimates of relative excess mortality and the stacking weights.
+
+# Conclusion
+
+Our proposal is a novel and fully Bayesian time series model for predicting excess mortality based on historical data, but the structure of the model is up for discussion. Our posterior predictive excess risk index depends on both a credible limit and a threshold of relative excess. The latter index of relative excess should be further discussed in a co-created process of focus group interviews with key policy-makers from the danish health authorities and other government decision makers and relevant stakeholders from the regional hospitals in order to determine the actual definition of excess mortality and model predictions.
+
+
+```{r, echo = FALSE, cache = TRUE}
+getStatsNormal <- \(m) {
+  newDat <- rbind(dTotal[,c("N", "time", "week")],
+                  data.frame(N = 5935859, time = 2023 + (1:52)/52, week = 1:52))
+  post_pred <- predict(m, newdata = newDat, summary = FALSE)
+  post_pred <- apply(post_pred, 1, \(q) q / 1000 * newDat$N)
+  
+  mean <- apply(post_pred, 1, mean)
+  L <- apply(post_pred, 1, quantile, 0.025)
+  U <- apply(post_pred, 1, quantile, 0.975)
+  
+  list(mean = mean, 
+       L = L, 
+       U = U,
+       newDat = newDat)
+}
+
+getExcessNormal <- \(m, alpha = 0.95) {
+  post_pred <- predict(m, summary = FALSE)
+  post_pred <- apply(post_pred, 1, \(q) q / 1000 * dTotal$N)
+  
+  resid <- apply(post_pred, 2, \(q) dTotal$observed / q)
+  
+  excessProp <- seq(1, 1.14, length.out = 100)
+  excessMat <- matrix(NA, length(dTotal$prop), length(excessProp))
+  for(a in 1:length(dTotal$prop)) {
+    for(b in 1:length(excessProp)) {
+      excessMat[a, b] <- mean(resid[a,] >= excessProp[b])
+    }
+  }
+  out <- excessMat
+  out[excessMat < alpha] <- NA
+  list(prop = excessProp, img = out)
+}
+
+getTrendsNormal <- \(m, global) {
+  if(global) {
+    global_mu <- posterior_smooths(m, "s(time)")
+    global_mu_mean = apply(global_mu, 2, mean)
+    global_mu_L = apply(global_mu, 2, quantile, 0.025)
+    global_mu_U = apply(global_mu, 2, quantile, 0.975)
+    
+    global_sigma <- posterior_smooths(m, "s(time)", dpar="sigma")
+    global_sigma_mean = apply(global_sigma, 2, mean)
+    global_sigma_L = apply(global_sigma, 2, quantile, 0.025)
+    global_sigma_U = apply(global_sigma, 2, quantile, 0.975)
+  } else {
+    global_mu_mean <- NA
+    global_mu_L <- NA
+    global_mu_U <- NA
+    global_sigma_mean <- NA
+    global_sigma_L <- NA
+    global_sigma_U <- NA
+  }
+  
+  year_mu <- posterior_smooths(m, 's(week,bs="cc")',
+                              newdata = data.frame(year = 2018 + (1:53)/53,
+                                                   week  = 1:53))
+  year_mu_mean = apply(year_mu, 2, mean)
+  year_mu_L = apply(year_mu, 2, quantile, 0.025)
+  year_mu_U = apply(year_mu, 2, quantile, 0.975)  
+  
+  year_sigma <- posterior_smooths(m, 's(week,bs="cc")',
+                                  newdata = data.frame(year = 2018 + (1:53)/53,
+                                                       week  = 1:53),
+                                  dpar = "sigma")
+  year_sigma_mean = apply(year_sigma, 2, mean)
+  year_sigma_L = apply(year_sigma, 2, quantile, 0.025)
+  year_sigma_U = apply(year_sigma, 2, quantile, 0.975)  
+    
+  list(global_mu_mean = global_mu_mean,
+       global_mu_L = global_mu_L,
+       global_mu_U = global_mu_U,
+       global_sigma_mean = global_sigma_mean,
+       global_sigma_L = global_sigma_L,
+       global_sigma_U = global_sigma_U,
+       year_mu_mean = year_mu_mean,
+       year_mu_L = year_mu_L,
+       year_mu_U = year_mu_U,
+       year_sigma_mean = year_sigma_mean,
+       year_sigma_L = year_sigma_L,
+       year_sigma_U = year_sigma_U)
+}
+
+
+stats_global3 <- getStatsNormal(m_global3)
+excess_global3 <- getExcessNormal(m_global3)
+trends_global3 <- getTrendsNormal(m_global3, TRUE)
+
+stats_local3 <- getStatsNormal(m_local3)
+excess_local3 <- getExcessNormal(m_local3)
+trends_local3 <- getTrendsNormal(m_local3, FALSE)
+
+excess_global4 <- getExcessNormal(m_global4)
+trends_global4 <- getTrendsNormal(m_global4, TRUE)
+```
+
+```{r, fig.width = 8, fig.height = 5, echo = FALSE, fig.cap="\\label{fig:normalFits} Results from fitting the normal model with both a global and yearly effect and only a yearly effect on both the mean and variance parameters. Posterior predictive intervals and relative excess mortality estimates at certainty level 95\\%.", echo = FALSE}
+par(mfrow=c(2,2), mgp=c(2,1,0), mar=c(3,3,2,2), bty="n")
+plot(observed ~ time, data = dTotal, pch=19, cex=0.4, type="n",
+     ylim=c(800,1800), xlim=c(2017, 2024), xlab="Calendar time", ylab="#deaths")
+ci(stats_global3$newDat$time, stats_global3$L, stats_global3$U)
+lines(stats_global3$newDat$time, stats_global3$mean, lwd = 2, type="l")
+points(observed ~ time, data = dTotal, pch=19, cex=0.5)
+title("Posterior prediction\n Normal model (global trend + yearly trend)", cex.main=0.9)
+abline(v=max(dTotal$time), lty=2)
+
+plot(observed ~ time, data = dTotal, pch=19, cex=0.4, type="n",
+     ylim=c(800,1800), xlim=c(2017, 2024), xlab="Calendar time", ylab="#deaths")
+ci(stats_local3$newDat$time, stats_local3$L, stats_local3$U)
+lines(stats_local3$newDat$time, stats_local3$mean, lwd = 2, type="l")
+points(observed ~ time, data = dTotal, pch=19, cex=0.5)
+title("Posterior prediction\n Normal model (yearly trend only)", cex.main=0.9)
+abline(v=max(dTotal$time), lty=2)
+
+image(dTotal$time, excess_global3$prop, excess_global3$img, xlim=c(2017, 2023),
+      xlab="Calendar time", ylab="Relative excess mortality", col="black")
+title("Excess mortality probability >= 95%\n Normal model (global + yearly trend)", cex.main=0.9)
+
+image(dTotal$time, excess_local3$prop, excess_local3$img, xlim=c(2017, 2023),
+      xlab="Calendar time", ylab="Relative excess mortality", col="black")
+title("Excess mortality probability >= 95%\n Normal model (yearly trend only)", cex.main=0.9)
+```
+
+
+
+```{r, fig.width = 8, fig.height = 5, echo = FALSE, fig.cap="\\label{fig:normalSmooths}  Posterior estimates of the global and yearly effects from the normal model with 95\\% credible intervals.", echo = FALSE}
+par(mfrow=c(2,3), mgp=c(2,1,0), mar=c(3,3,2.5,2), bty="n")
+plot(dTotal$time, trends_global3$global_mu_mean, type="n", ylim=c(-0.02, 0.02),
+     xlab="Calendar time", ylab="Partial effect", xlim=c(2017, 2024))
+ci(dTotal$time, trends_global3$global_mu_L, trends_global3$global_mu_U)
+lines(dTotal$time, trends_global3$global_mu_mean, lwd=2)
+title("Global trend (mean)\n Normal model (global + yearly trend)")
+abline(h = 0, lty=3)
+
+plot(1:53, trends_global3$year_mu_mean, type="n", ylim=c(-0.03, 0.03),
+     xlab="Month of year", ylab="Partial effect")
+ci(1:53, trends_global3$year_mu_L, trends_global3$year_mu_U)
+lines(1:53, trends_global3$year_mu_mean, lwd=2)
+title("Yearly trend (mean)\n Normal model (global + yearly trend)")
+abline(h = 0, lty=3)
+
+plot(1:53, trends_local3$year_mu_mean, type="n", ylim=c(-0.03, 0.03),
+     xlab="Month of year", ylab="Partial effect")
+ci(1:53, trends_local3$year_mu_L, trends_local3$year_mu_U)
+lines(1:53, trends_local3$year_mu_mean, lwd=2)
+title("Yearly trend only (mean)\n Normal model")
+abline(h = 0, lty=3)
+
+plot(dTotal$time, trends_global3$global_sigma_mean, type="n", ylim=c(-1, 1),
+     xlab="Calendar time", ylab="log Partial effect", xlim=c(2017, 2024))
+ci(dTotal$time, trends_global3$global_sigma_L, trends_global3$global_sigma_U)
+lines(dTotal$time, trends_global3$global_sigma_mean, lwd=2)
+title("Global trend (sigma)\n Normal model")
+abline(h = 0, lty=3)
+
+plot(1:53, trends_global3$year_sigma_mean, type="n", ylim=c(-1, 1),
+     xlab="Calendar time", ylab="log Partial effect")
+ci(1:53, trends_global3$year_sigma_L, trends_global3$year_sigma_U)
+lines(1:53, trends_global3$year_sigma_mean, lwd=2)
+title("Global trend (sigma)\n Normal model")
+abline(h = 0, lty=3)
+
+plot(1:53, trends_local3$year_sigma_mean, type="n", ylim=c(-1, 1),
+     xlab="Month of year", ylab="log partial effect")
+ci(1:53, trends_local3$year_sigma_L, trends_local3$year_sigma_U)
+lines(1:53, trends_local3$year_sigma_mean, lwd=2)
+title("Yearly trend only (sigma)\n Normal model")
+abline(h = 0, lty=3)
+```
+
+
+```{r, fig.width = 8, fig.height = 9, echo = FALSE, fig.cap="\\label{fig:normalFits2} Results from fitting the normal model with a global and yearly effect on both the mean and variance and a first order autoregressive component. Posterior predictive intervals and relative excess mortality estimates at certainty level 95\\%.", echo = FALSE}
+post_pred <- predict(m_global4, summary = FALSE)
+post_pred <- apply(post_pred, 1, \(q) q / 1000 * dTotal$N)
+mean <- apply(post_pred, 1, mean)
+L <- apply(post_pred, 1, quantile, 0.025)
+U <- apply(post_pred, 1, quantile, 0.975)
+
+par(mfrow=c(3,2), mgp=c(2,1,0), mar=c(3,3,2,2), bty="n")
+plot(observed ~ time, data = dTotal, pch=19, cex=0.4, type="n",
+     ylim=c(800,1800), xlim=c(2017, 2023), xlab="Calendar time", ylab="#deaths")
+ci(dTotal$time, L, U)
+lines(dTotal$time, mean, lwd = 2, type="l")
+points(observed ~ time, data = dTotal, pch=19, cex=0.5)
+title("Posterior prediction\n Normal model (global + yearly + AR(1))", cex.main=0.9)
+
+image(dTotal$time, excess_global4$prop, excess_global4$img, xlim=c(2017, 2023),
+      xlab="Calendar time", ylab="Relative excess mortality", col="black")
+title("Excess mortality probability >= 95%\n Normal model (global + yearly + AR(1))", cex.main=0.9)
+
+plot(dTotal$time, trends_global4$global_mu_mean, type="n", ylim=c(-0.02, 0.02),
+     xlab="Calendar time", ylab="Partial effect", xlim=c(2017, 2024))
+ci(dTotal$time, trends_global4$global_mu_L, trends_global4$global_mu_U)
+lines(dTotal$time, trends_global4$global_mu_mean, lwd=2)
+title("Global trend (mean)")
+abline(h = 0, lty=3)
+
+plot(1:53, trends_global4$year_mu_mean, type="n", ylim=c(-0.03, 0.03),
+     xlab="Month of year", ylab="Partial effect")
+ci(1:53, trends_global4$year_mu_L, trends_global4$year_mu_U)
+lines(1:53, trends_global4$year_mu_mean, lwd=2)
+title("Yearly trend (mean)")
+abline(h = 0, lty=3)
+
+plot(dTotal$time, trends_global4$global_sigma_mean, type="n", ylim=c(-1, 1),
+     xlab="Calendar time", ylab="log Partial effect", xlim=c(2017, 2024))
+ci(dTotal$time, trends_global4$global_sigma_L, trends_global4$global_sigma_U)
+lines(dTotal$time, trends_global4$global_sigma_mean, lwd=2)
+title("Global trend (sigma)")
+abline(h = 0, lty=3)
+
+plot(1:53, trends_global4$year_sigma_mean, type="n", ylim=c(-1, 1),
+     xlab="Month of year", ylab="log Partial effect")
+ci(1:53, trends_global4$year_sigma_L, trends_global4$year_sigma_U)
+lines(1:53, trends_global4$year_sigma_mean, lwd=2)
+title("Global trend (sigma)")
+abline(h = 0, lty=3)
+```
+
+```{r, cache = TRUE, echo = FALSE}
+load("postavg.RData")
+
+post_pred <- apply(ppavg, 1, \(q) q / 1000 * dTotal$N)
+mean <- apply(post_pred, 1, mean)
+L <- apply(post_pred, 1, quantile, 0.025)
+U <- apply(post_pred, 1, quantile, 0.975)
+resid <- apply(post_pred, 2, \(q) dTotal$observed / q)
+
+excessProp <- seq(1, 1.14, length.out = 100)
+excessMat <- matrix(NA, length(dTotal$prop), length(excessProp))
+for(a in 1:length(dTotal$prop)) {
+  for(b in 1:length(excessProp)) {
+    excessMat[a, b] <- mean(resid[a,] >= excessProp[b])
+  }
+}
+out <- excessMat
+out[excessMat < 0.95] <- NA
+```
+
+```{r, fig.width = 8, fig.height = 3, echo = FALSE, fig.cap="\\label{fig:normalFits4} Results from fitting stacked normal model. Posterior predictive intervals and relative excess mortality estimates at certainty level 95\\%.", echo = FALSE}
+par(mfrow=c(1,3), mgp=c(2,1,0), mar=c(3,3,2,2), bty="n")
+plot(1:20, attr(ppavg, "weights"), type="h", lwd=2, 
+     xlab="AR order", ylab="Stacking weights", ylim=c(0,0.25), xaxt="n")
+axis(1, seq(1, 20, 2))
+title("Weights\n Normal model (stacking)", cex.main=0.9)
+
+plot(observed ~ time, data = dTotal, pch=19, cex=0.4, type="n",
+     ylim=c(800,1800), xlim=c(2017, 2023), xlab="Calendar time", ylab="#deaths")
+ci(dTotal$time, L, U)
+lines(dTotal$time, mean, lwd = 2, type="l")
+points(observed ~ time, data = dTotal, pch=19, cex=0.5)
+title("Posterior prediction\n Normal model (stacking)", cex.main=0.9)
+
+image(dTotal$time, excessProp, out, xlim=c(2017, 2023),
+      xlab="Calendar time", ylab="Relative excess mortality", col="black")
+title("Excess mortality probability >= 95%\n Normal model (stacking)", cex.main=0.9)
+```
